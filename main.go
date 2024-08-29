@@ -41,6 +41,7 @@ type ResponseCEP struct {
 	Provider     string `json:"provider"`
 }
 
+
 func main() {
 	ctx := context.Background()
 	ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
@@ -51,52 +52,84 @@ func main() {
 	go BuscaCEP(ctx, "brasilapi", "29102-385", response)
 	go BuscaCEP(ctx, "viacep", "29102-385", response)
 
-	data := <-response
-	log.Println(data)
+	select {
+	case data := <-response:
+		log.Println(data)
+	case <-ctx.Done():
+		log.Println("Timeout reached, no response received")
+	}
 }
 
 func BuscaCEP(ctx context.Context, provider string, cep string, response chan ResponseCEP) {
+	var url string
 	switch provider {
 	case "brasilapi":
-		url := "https://brasilapi.com.br/api/cep/v1/" + cep
-		res, err := BuscaCEPClient(ctx, url)
-		var data BrasilApiCEP
-		err = json.Unmarshal(res, &data)
-		if err != nil {
-			log.Println(err)
-		}
-		response <- ResponseCEP{Cep: data.Cep, State: data.State, City: data.City, Neighborhood: data.Neighborhood, Street: data.Street, Provider: "brasilapi"}
-		ctx.Done()
+		url = "https://brasilapi.com.br/api/cep/v1/" + cep
 	case "viacep":
-		url := "https://viacep.com.br/ws/" + cep + "/json/"
-		res, err := BuscaCEPClient(ctx, url)
-		var data ViaCEP
-		err = json.Unmarshal(res, &data)
-		if err != nil {
-			log.Println(err)
+		url = "https://viacep.com.br/ws/" + cep + "/json/"
+	default:
+		log.Println("Unknown provider:", provider)
+		return
+	}
+
+	res, err := BuscaCEPClient(ctx, url, provider)
+	if err != nil {
+		log.Println("Error fetching data from", provider, ":", err)
+		return
+	}
+
+	var data ResponseCEP
+	switch provider {
+	case "brasilapi":
+		var brasilApiData BrasilApiCEP
+		if err := json.Unmarshal(res, &brasilApiData); err != nil {
+			log.Println("Error unmarshalling BrasilApiCEP data:", err)
+			return
 		}
-		response <- ResponseCEP{Cep: data.Cep, State: data.Uf, City: data.Localidade, Neighborhood: data.Bairro, Street: data.Logradouro, Provider: "viacep"}
-		ctx.Done()
+		data = ResponseCEP{
+			Cep:          brasilApiData.Cep,
+			State:        brasilApiData.State,
+			City:         brasilApiData.City,
+			Neighborhood: brasilApiData.Neighborhood,
+			Street:       brasilApiData.Street,
+			Provider:     "brasilapi",
+		}
+	case "viacep":
+		var viaCepData ViaCEP
+		if err := json.Unmarshal(res, &viaCepData); err != nil {
+			log.Println("Error unmarshalling ViaCEP data:", err)
+			return
+		}
+		data = ResponseCEP{
+			Cep:          viaCepData.Cep,
+			State:        viaCepData.Uf,
+			City:         viaCepData.Localidade,
+			Neighborhood: viaCepData.Bairro,
+			Street:       viaCepData.Logradouro,
+			Provider:     "viacep",
+		}
+	}
+
+	select {
+	case response <- data:
+	case <-ctx.Done():
+		log.Println("Context cancelled before sending response")
 	}
 }
 
-func BuscaCEPClient(ctx context.Context, url string) ([]byte, error) {
-	select {
-	case <-ctx.Done():
-		log.Println("Timeout reached")
-		return nil, ctx.Err()
-	default:
-		req, err := http.Get(url)
-		if err != nil {
-			log.Println(err)
-			return nil, err
-		}
-		defer req.Body.Close()
-		res, err := io.ReadAll(req.Body)
-		if err != nil {
-			log.Println(err)
-			return nil, err
-		}
-		return res, nil
+func BuscaCEPClient(ctx context.Context, url string, provider string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
 	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	res, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
 }
