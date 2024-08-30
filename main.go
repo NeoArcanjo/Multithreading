@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -45,23 +46,35 @@ type ResponseCEP struct {
 func main() {
 	ctx := context.Background()
 	ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
+
+	var wg sync.WaitGroup
+	// Mantendo dois para demonstrar que a chamada mais lenta está sendo cancelada pelo contexto
+	wg.Add(2)
+
 	defer cancel()
 
 	response := make(chan ResponseCEP)
-
-	go BuscaCEP(ctx, "brasilapi", "29102-385", response)
-	go BuscaCEP(ctx, "viacep", "29102-385", response)
+	defer close(response)
+	
+	go BuscaCEP(ctx, "brasilapi", "29102-385", response, &wg)
+	go BuscaCEP(ctx, "viacep", "29102-385", response, &wg)
 
 	select {
 	case data := <-response:
 		log.Println(data)
+		cancel()
 	case <-ctx.Done():
 		log.Println("Timeout reached, no response received")
 	}
+
+	wg.Wait()
+	log.Println("Done!")
 }
 
-func BuscaCEP(ctx context.Context, provider string, cep string, response chan ResponseCEP) {
+func BuscaCEP(ctx context.Context, provider string, cep string, response chan ResponseCEP, wg *sync.WaitGroup) {
+	defer wg.Done()
 	var url string
+	log.Println("Fetching data from", provider)
 	switch provider {
 	case "brasilapi":
 		url = "https://brasilapi.com.br/api/cep/v1/" + cep
@@ -112,6 +125,7 @@ func BuscaCEP(ctx context.Context, provider string, cep string, response chan Re
 
 	select {
 	case response <- data:
+		log.Println("Response received from", provider)
 	case <-ctx.Done():
 		log.Println("Context cancelled before sending response")
 	}
